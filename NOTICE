@@ -1,0 +1,21 @@
+AutoDisplay
+Copyright (c) 2026 AyingAI
+Distributed under the MIT License; see LICENSE.
+
+Technical references
+
+The IOAVService API signatures and DDC transport framing were checked against:
+- AppleSiliconDDC by waydabber: https://github.com/waydabber/AppleSiliconDDC
+- m1ddc by waydabber: https://github.com/waydabber/m1ddc
+
+These projects are acknowledged as technical references. Their libraries and
+binaries are not bundled here. Third-party projects retain their own licenses.
+
+Artwork
+
+NativeApp/Resources/AppIcon.png was generated with OpenAI's image_gen tool for
+AutoDisplay. The generation prompt is provided as AppIcon-prompt.txt. The icon
+is included with this project's materials under the accompanying LICENSE.
+
+Apple, Samsung, IINA, Chrome and Dia names identify compatible platforms or
+products. This project is independent of their owners.

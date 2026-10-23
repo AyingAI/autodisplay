@@ -1,0 +1,16 @@
+.build/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local device reports and credentials.
+local/
+diagnostics/
+.env
+.env.*
+!.env.example
+*.log
+*.dmg
+*.zip
+*.icns

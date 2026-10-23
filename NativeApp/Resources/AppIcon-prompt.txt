@@ -1,0 +1,8 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand.
+Asset type: final macOS application icon for AutoDisplay, a lightweight utility that automatically adjusts monitor brightness when watching fullscreen videos.
+Primary request: Design a memorable, refined app icon combining sunlight / brightness and video playback into one simple symbol, immediately recognizable at small sizes in the macOS Applications folder.
+Composition: one centered macOS rounded-square tile with generous uniform transparent padding outside the tile. Tile occupies about 84% of a square 1024x1024 canvas. Inside the tile, a single luminous sun disk with eight short bold evenly spaced rays. A clear right-pointing triangular play cutout in the center of the sun. Large balanced central mark, optical centering. No monitor outline or extra symbols.
+Style: premium contemporary native Mac icon, restrained soft 3D depth, gently beveled tile edges and subtle refined materials, crisp bold silhouettes with minimal detail. Deep midnight indigo tile, warm golden-yellow sun, tiny soft amber halo for warmth, dark indigo play cutout. High contrast and legible at 32 pixels. Tile viewed straight on, no perspective.
+Text: none. No lettering, labels, watermark, icon grid, external background, hand, device mockup, or presentation scene. Real transparent pixels around the rounded-square tile. Deliver only one finished icon.

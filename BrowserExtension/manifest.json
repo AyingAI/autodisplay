@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "AutoDisplay · 全屏视频",
+  "version": "0.1.0",
+  "description": "全屏视频时通知本机 AutoDisplay 调亮显示器，退出后恢复日常亮度。",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:48741/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "match_about_blank": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "AutoDisplay：连接菜单栏工具",
+    "default_popup": "popup.html"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3sg4QN9YD3ujxdz+t1U3RixNj3adD/J16jkezZlKVoS5KFIPG0rXcvWQSAclG6ujhz+t3QtmWgsyjQn2l3ms/thi3HzV58qtPih2RE85r6WHYkCwKJPPopdt1FiXkiIrwFtQeaBAwF4+l+6agbxrMg3P/q/nAj+no0nkSEKZKdp1XETTCn2aL0yZ0RptwB6AZgF49/mkdP5SSQ/ykicif2vHbbfr1Eo3Ua+ssgjQUbl1TMPuW5eA7q2OBs5foARlV1ixue1nqVGxnwY+WQEbgES/GLbl8hjeZGuGNS/D13ovjhfbD8sNq/M+u4cazPZzvyb3lIfQaXuNCYuUyTvc/wIDAQAB"
+}
