@@ -1,3 +1,5 @@
+![AutoDisplay：全屏观影，自动调亮；退出全屏，恢复日常亮度](docs/cover.webp)
+
 <img src="NativeApp/Resources/AppIcon.png" width="96" alt="AutoDisplay：太阳与播放键">
 
 # AutoDisplay
@@ -128,6 +130,6 @@ docs/                   适配方法、调查结论、公开内容整理说明
 
 ## 许可与参考
 
-[MIT License](LICENSE)。应用图标由 OpenAI image_gen 生成，源图和生成提示词随仓库提供。
+[MIT License](LICENSE)。应用图标由 OpenAI image_gen 生成，源图和生成提示词随仓库提供。作品封面也由 OpenAI image_gen 生成，4:3 封面和[生成提示词](docs/cover-prompt.md)随仓库提供。
 
 IOAVService 接口和传输方式参考 [AppleSiliconDDC](https://github.com/waydabber/AppleSiliconDDC) 与 [m1ddc](https://github.com/waydabber/m1ddc)。仓库未打包它们的库或二进制；致谢见 [NOTICE](NOTICE)。本项目与 Apple、Samsung、IINA 及相关浏览器无隶属关系。
