@@ -9,7 +9,7 @@ struct BrowserPairing: Codable {
 
 final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults = UserDefaults.standard
-    private let ddc = DisplayDDC()
+    private let brightness = BrightnessController(display: DisplayDDC(), defaults: .standard)
     private let hardwareQueue = DispatchQueue(label: "local.autodisplay.hardware")
     private var statusItem: NSStatusItem!
     private var timer: Timer?
@@ -22,7 +22,11 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var currentBrightness: Int?
     private var movie = false
     private var applying = false
-    private var prepared = false
+    private var automation = BrightnessAutomation()
+    private var pendingManualBrightness: Int?
+    private var brightnessSlider: NSSlider?
+    private var brightnessLabel: NSTextField?
+    private var brightnessStatusItem: NSMenuItem?
     private var terminating = false
     private var desiredMovie = false
     private var lastCandidate = false
@@ -38,7 +42,7 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSLog("AutoDisplay menu bar starting")
         NSApp.setActivationPolicy(.accessory)
         enabled = defaults.object(forKey: "enabled") as? Bool ?? true
-        dailyBrightness = min(100, max(0, defaults.object(forKey: "dailyBrightness") as? Int ?? 30))
+        dailyBrightness = brightness.dailyBrightness
         if let data = defaults.data(forKey: "browserPairings"),
            let saved = try? JSONDecoder().decode([String: BrowserPairing].self, from: data) { pairings = saved }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -59,27 +63,35 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             source.resume()
             signalSources.append(source)
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in self?.tick() }
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke),
-            name: NSWorkspace.didWakeNotification, object: nil)
+        let pollingTimer = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(pollingTimer, forMode: .common)
+        timer = pollingTimer
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+            workspaceNotifications.addObserver(self, selector: #selector(sleeping), name: name, object: nil)
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            workspaceNotifications.addObserver(self, selector: #selector(woke), name: name, object: nil)
+        }
         refreshMenu()
         prepareHardware()
     }
 
     private func prepareHardware() {
         applying = true
-        let recover = defaults.bool(forKey: "restorePending")
-        let daily = dailyBrightness
+        let generation = automation.generation
+        let forceRestore = automation.restoringAfterWake
         hardwareQueue.async {
-            let result = Result { () -> Int in
-                if recover { try self.ddc.setBrightness(daily); self.defaults.set(false, forKey: "restorePending") }
-                return try self.ddc.brightness()
-            }
+            let result = Result { try self.brightness.prepare(forceRestore: forceRestore) }
             DispatchQueue.main.async {
                 self.applying = false
-                self.prepared = true
                 switch result {
-                case .success(let value): self.currentBrightness = value; self.hardwareError = nil
+                case .success(let value):
+                    self.automation.recovered(generation: generation)
+                    self.movie = false
+                    self.currentBrightness = value
+                    self.hardwareError = nil
+                    if generation == self.automation.generation { self.retryAfter = .distantPast }
                 case .failure(let error): self.hardwareError = error.localizedDescription; self.retryAfter = Date().addingTimeInterval(10)
                 }
                 self.refreshMenu()
@@ -88,13 +100,29 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func sleeping() {
+        automation.sleep()
+        resetVideoActivity()
+    }
+
     @objc private func woke() {
-        retryAfter = .distantPast
-        if !applying { prepareHardware() }
+        guard !terminating else { return }
+        automation.wake()
+        resetVideoActivity()
+        // Display-only wake also needs recovery. Give DDC time to come online;
+        // tick() keeps retrying if this first attempt fails or a write is busy.
+        retryAfter = Date().addingTimeInterval(2)
+    }
+
+    private func resetVideoActivity() {
+        pulses.removeAll()
+        desiredMovie = false
+        lastCandidate = false
+        candidateSince = Date()
     }
 
     private func tick() {
-        guard !terminating, prepared else { return }
+        guard !terminating, !automation.suspended else { return }
         let now = Date()
         var candidate = false
         if enabled, let target = TargetDisplay.connected(),
@@ -108,10 +136,21 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         if candidate != lastCandidate { lastCandidate = candidate; candidateSince = now }
-        if now.timeIntervalSince(candidateSince) >= 0.3 || !enabled { desiredMovie = candidate }
-        if !applying, now >= retryAfter,
-           (desiredMovie != movie || (defaults.bool(forKey: "restorePending") && !desiredMovie)) {
-            apply(movie: desiredMovie)
+        if now.timeIntervalSince(candidateSince) >= 0.3 || !enabled {
+            desiredMovie = candidate
+            automation.updateCandidate(candidate)
+        }
+        if !applying, now >= retryAfter {
+            if let value = pendingManualBrightness {
+                applyManualBrightness(value)
+            } else {
+                switch automation.nextAction(desiredMovie: desiredMovie, movie: movie,
+                                             restorePending: defaults.bool(forKey: "restorePending")) {
+                case .recover: prepareHardware()
+                case .movie(let target): apply(movie: target)
+                case nil: break
+                }
+            }
         }
         tickCount += 1
         if tickCount % 4 == 0 { refreshMenu() }
@@ -120,33 +159,11 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func apply(movie targetMovie: Bool) {
         guard !applying, !terminating else { return }
         applying = true
-        let restoreValue = dailyBrightness
+        let generation = automation.generation
         refreshMenu()
         hardwareQueue.async {
-            var savedDaily = restoreValue
-            let result = Result { () -> Int in
-                if targetMovie {
-                    // Capture the user's actual daily setting instead of always forcing 30.
-                    let before = try self.ddc.brightness()
-                    if !self.defaults.bool(forKey: "restorePending") {
-                        savedDaily = before
-                        self.defaults.set(savedDaily, forKey: "dailyBrightness")
-                    }
-                    self.defaults.set(true, forKey: "restorePending")
-                    do { try self.ddc.setBrightness(100) }
-                    catch {
-                        // A failed readback may follow an applied write: attempt restoration.
-                        if (try? self.ddc.setBrightness(savedDaily)) != nil {
-                            self.defaults.set(false, forKey: "restorePending")
-                        }
-                        throw error
-                    }
-                    return 100
-                }
-                try self.ddc.setBrightness(restoreValue)
-                self.defaults.set(false, forKey: "restorePending")
-                return restoreValue
-            }
+            let result = Result { try self.brightness.applyMovie(targetMovie) }
+            let savedDaily = self.brightness.dailyBrightness
             DispatchQueue.main.async {
                 self.dailyBrightness = savedDaily
                 self.applying = false
@@ -155,30 +172,97 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.movie = targetMovie
                     self.currentBrightness = value
                     self.hardwareError = nil
-                    self.retryAfter = .distantPast
+                    if generation == self.automation.generation { self.retryAfter = .distantPast }
                 case .failure(let error):
                     self.hardwareError = error.localizedDescription
                     self.retryAfter = Date().addingTimeInterval(10)
                 }
                 self.refreshMenu()
+                self.tick()
+            }
+        }
+    }
+
+    private func applyManualBrightness(_ value: Int) {
+        guard !applying, !terminating, !automation.suspended else { return }
+        pendingManualBrightness = nil
+        applying = true
+        let generation = automation.generation
+        refreshMenu()
+        hardwareQueue.async {
+            let result = Result { try self.brightness.setManualBrightness(value) }
+            let daily = self.brightness.dailyBrightness
+            DispatchQueue.main.async {
+                self.applying = false
+                self.dailyBrightness = daily
+                switch result {
+                case .success(let actual):
+                    self.automation.recovered(generation: generation)
+                    self.movie = false
+                    self.currentBrightness = actual
+                    self.hardwareError = nil
+                    if generation == self.automation.generation { self.retryAfter = .distantPast }
+                case .failure(let error):
+                    self.hardwareError = error.localizedDescription
+                    self.retryAfter = Date().addingTimeInterval(10)
+                }
+                self.refreshMenu()
+                self.tick()
             }
         }
     }
 
     private func refreshMenu() {
-        guard statusItem != nil, !menuIsOpen else { return }
+        guard statusItem != nil else { return }
+        let status = automation.suspended ? "屏幕已休眠" : applying ? "正在调整亮度…" :
+            hardwareError != nil ? "亮度调整失败，将自动重试" : movie ? "观影 · 100%" :
+            "\(automation.manualOverride ? "手动" : "日常") · \(currentBrightness ?? dailyBrightness)%"
+        if menuIsOpen {
+            brightnessStatusItem?.title = status
+            brightnessStatusItem?.toolTip = hardwareError
+            return
+        }
         let menu = NSMenu()
         menu.delegate = self
         func line(_ title: String) { let item = NSMenuItem(title: title, action: nil, keyEquivalent: ""); item.isEnabled = false; menu.addItem(item) }
-        line(applying ? "正在调整亮度…" : movie ? "观影 · 100%" : "日常 · \(currentBrightness ?? dailyBrightness)%")
+        let statusLine = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+        statusLine.isEnabled = false
+        menu.addItem(statusLine)
+        brightnessStatusItem = statusLine
         if let error = hardwareError { line(error) }
         let toggle = NSMenuItem(title: "自动调整亮度", action: #selector(toggleEnabled), keyEquivalent: "")
         toggle.target = self; toggle.state = enabled ? .on : .off; menu.addItem(toggle)
         menu.addItem(.separator())
+        let value = pendingManualBrightness ?? currentBrightness ?? dailyBrightness
+        let control = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 66))
+        let label = NSTextField(labelWithString: "手动亮度：\(value)%")
+        label.frame = NSRect(x: 18, y: 39, width: 224, height: 18)
+        control.addSubview(label)
+        brightnessLabel = label
+        let slider = NSSlider(value: Double(value), minValue: 0, maxValue: 100,
+                              target: self, action: #selector(adjustBrightness(_:)))
+        slider.frame = NSRect(x: 18, y: 10, width: 224, height: 24)
+        slider.isContinuous = false // Write on release, without flooding DDC while dragging.
+        slider.isEnabled = !automation.suspended
+        slider.setAccessibilityLabel("显示器亮度")
+        control.addSubview(slider)
+        brightnessSlider = slider
+        let sliderItem = NSMenuItem()
+        sliderItem.view = control
+        menu.addItem(sliderItem)
+        let restore = NSMenuItem(title: "恢复日常亮度（\(dailyBrightness)%）", action: #selector(restoreDaily), keyEquivalent: "")
+        restore.target = self
+        restore.isEnabled = !automation.suspended
+        menu.addItem(restore)
+        if automation.manualOverride { line("手动优先，退出本次全屏后恢复自动") }
+        menu.addItem(.separator())
         line("观影亮度：100%")
         line("恢复亮度：\(dailyBrightness)%")
         let remember = NSMenuItem(title: "记住当前日常亮度", action: #selector(rememberDaily), keyEquivalent: "")
-        remember.target = self; remember.isEnabled = !movie && !applying; menu.addItem(remember)
+        remember.target = self
+        remember.isEnabled = !movie && !applying && !automation.suspended && !automation.needsRecovery &&
+            !defaults.bool(forKey: "restorePending") && pendingManualBrightness == nil
+        menu.addItem(remember)
         menu.addItem(.separator())
         line("IINA：自动检测全屏窗口")
         for browser in [VideoApps.chrome, VideoApps.dia] {
@@ -203,10 +287,16 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
-        guard !movie, !applying else { return }
+        guard !applying, !automation.suspended else { return }
         hardwareQueue.async {
-            guard let value = try? self.ddc.brightness() else { return }
-            DispatchQueue.main.async { self.currentBrightness = value }
+            guard let value = try? self.brightness.currentBrightness() else { return }
+            DispatchQueue.main.async {
+                guard !self.applying, self.pendingManualBrightness == nil else { return }
+                self.currentBrightness = value
+                self.brightnessSlider?.integerValue = value
+                self.brightnessLabel?.stringValue = "手动亮度：\(value)%"
+                self.refreshMenu()
+            }
         }
     }
 
@@ -214,21 +304,43 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleEnabled() {
         enabled.toggle(); defaults.set(enabled, forKey: "enabled")
+        automation.resumeAutomaticControl()
         retryAfter = .distantPast; tick(); refreshMenu()
     }
 
+    @objc private func adjustBrightness(_ sender: NSSlider) {
+        requestManualBrightness(sender.integerValue)
+    }
+
+    @objc private func restoreDaily() { requestManualBrightness(dailyBrightness) }
+
+    private func requestManualBrightness(_ value: Int) {
+        guard !terminating, !automation.suspended else { return }
+        automation.takeManualControl()
+        pendingManualBrightness = value
+        brightnessSlider?.integerValue = value
+        brightnessLabel?.stringValue = "手动亮度：\(value)%"
+        retryAfter = .distantPast
+        tick()
+        refreshMenu()
+    }
+
     @objc private func rememberDaily() {
-        guard !movie, !applying else { return }
+        guard !movie, !applying, !automation.suspended, !automation.needsRecovery,
+              !defaults.bool(forKey: "restorePending"), pendingManualBrightness == nil else { return }
+        applying = true
         hardwareQueue.async {
-            let result = Result { try self.ddc.brightness() }
+            let result = Result { try self.brightness.rememberDaily() }
             DispatchQueue.main.async {
+                self.applying = false
                 switch result {
                 case .success(let value):
                     self.dailyBrightness = value; self.currentBrightness = value
-                    self.defaults.set(value, forKey: "dailyBrightness")
+                    self.hardwareError = nil
                 case .failure(let error): self.hardwareError = error.localizedDescription
                 }
                 self.refreshMenu()
+                self.tick()
             }
         }
     }
@@ -254,8 +366,9 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
         if request.method == "GET", request.path == "/health" {
-            return .json(["app": "AutoDisplay", "enabled": enabled, "ready": prepared,
+            return .json(["app": "AutoDisplay", "enabled": enabled, "ready": !automation.needsRecovery,
                           "movie": movie, "applying": applying,
+                          "suspended": automation.suspended, "manualOverride": automation.manualOverride,
                           "brightness": currentBrightness ?? -1, "dailyBrightness": dailyBrightness,
                           "displayConnected": TargetDisplay.connected() != nil,
                           "hardwareError": hardwareError ?? "", "bridgeError": bridgeError ?? ""])
@@ -299,12 +412,15 @@ final class AutoDisplayApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }
         terminating = true; timer?.invalidate(); bridge.stop()
+        let manualValue = pendingManualBrightness
         // The serial queue also waits for an in-flight movie write before restoring.
         hardwareQueue.async {
             var failure: Error?
-            if self.defaults.bool(forKey: "restorePending") {
-                let restoreValue = self.defaults.object(forKey: "dailyBrightness") as? Int ?? 30
-                do { try self.ddc.setBrightness(restoreValue); self.defaults.set(false, forKey: "restorePending") }
+            if let value = manualValue {
+                do { _ = try self.brightness.setManualBrightness(value) }
+                catch { failure = error }
+            } else if self.brightness.restorePending {
+                do { _ = try self.brightness.applyMovie(false) }
                 catch { failure = error }
             }
             // This must also run in AppKit's modal termination loop.
